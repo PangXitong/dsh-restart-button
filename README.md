@@ -8,8 +8,8 @@
 
 - 会话头部右侧工具区（工具栏）的关机图标按钮（⏻），悬浮高亮
 - 点击展开菜单：「重启」「关闭」
-  - **关闭**：立即关闭整个 DeepSeek Harness 进程
-  - **重启**：拉起一个独立、隐藏的子进程，2 秒后重新启动同一个 DSH 命令，旧标签页自动断线重连
+  - **关闭**：先关闭当前网页，再关闭整个 DeepSeek Harness 进程
+  - **重启**：先关闭当前网页，再由一个独立进程在 3 秒后重新启动同一个 DSH 命令
 - 自包含重启：用 `process.execPath` + `process.argv` 重新拉起 DSH，**无需任何外部 `.bat` / `.sh` 脚本**，跨平台（Windows / macOS / Linux）
 - 注册进 DSH 官方插槽 `conversation.session.header.utilities`，不改 DSH 核心；由 React 正常渲染，不依赖 DOM 结构猜测
 
@@ -26,8 +26,10 @@ dsh plugin --profile web add github:PangXitong/dsh-restart-button
 ## 使用
 
 1. 点击工具栏右侧的关机按钮（⏻）→ 下方展开菜单
-2. 点击「关闭」→ DSH 进程退出
-3. 点击「重启」→ DSH 进程重启，浏览器标签页断线后自动重连
+2. 点击「关闭」→ 当前网页关闭，随后 DSH 进程退出
+3. 点击「重启」→ 当前网页关闭，3 秒后 DSH 进程重启，刷新页面即可继续使用
+
+> 浏览器只允许脚本关闭「由脚本打开」的窗口，手动打开的标签页通常无法自动关闭。此时页面会转为整屏提示（「DSH 已关闭」/「DSH 正在重启…」），并提供「关闭此页面」按钮手动关闭。
 
 ## 工作原理
 
@@ -35,12 +37,39 @@ dsh plugin --profile web add github:PangXitong/dsh-restart-button
 
 | 半侧 | 文件 | 职责 |
 | --- | --- | --- |
-| Host（`lib/index.js`，Node 主进程） | `src/index.ts` | 通过 `ctx.inject(['webServer'])` 注册两条同源 HTTP 路由：`POST /dsh-restart-button/close`（`process.exit(0)`）与 `POST /dsh-restart-button/restart`（spawn 独立子进程重拉 DSH 后退出） |
-| Client（`lib/client.js`，浏览器） | `src/client/index.tsx` | 通过 `ctx.slots.inject('conversation.session.header.utilities', …)` 把关机按钮注册进会话头部右侧工具区（`kind: 'list'` 官方插槽）；点击按钮 `fetch` 同源路由 |
+| Host（`lib/index.js`，Node 主进程） | `src/index.ts` | 通过 `ctx.inject(['webServer'])` 注册两条同源 HTTP 路由：`POST /dsh-restart-button/close`（`process.exit(0)`）与 `POST /dsh-restart-button/restart`（先创建重启用的独立进程，再退出） |
+| Client（`lib/client.js`，浏览器） | `src/client/index.tsx` | 通过 `ctx.slots.inject('conversation.session.header.utilities', …)` 把关机按钮注册进会话头部右侧工具区（`kind: 'list'` 官方插槽）；点击按钮 `fetch` 同源路由，收到响应后关闭当前网页 |
 
-重启核心逻辑见 [src/index.ts](src/index.ts) 的 `relaunchDetached()`：用当前进程的 `process.execPath`（node）与 `process.argv.slice(1)`（启动参数，含 `--profile` 等）构造一条延迟 2 秒后重新执行的命令，以 detached、隐藏窗口方式 spawn，再让当前进程退出。因此无论你用 `dsh web`、`npx @deepseek-ai/dsh web` 还是 `node /path/to/dsh web` 启动，都能正确重启。
+### 关闭 / 重启的执行顺序
+
+两个操作走同一套顺序 —— **先关网页，再关或重启 DSH**：
+
+1. 客户端 `fetch` 调用对应的同源路由（`keepalive: true`，即使页面立刻关闭请求也能送达）
+2. Host 回复 `{ ok: true }`
+3. 客户端调用 `window.close()` 关闭当前页面
+4. Host 随后才真正动作：**关闭**直接 `process.exit(0)`；**重启**则先创建好重启进程，再 `process.exit(0)`
+
+重启进程在 Host 回复**之后**才被创建，因此页面一定先消失。
+
+### 重启是如何做到的（`src/index.ts`）
+
+关键点是：**从 DSH 进程里 `spawn(..., { detached: true })` 出来的子进程，在 Windows 上活不过父进程** —— 它仍在 DSH 的进程树 / 作业对象里，DSH 一退出就被一起杀掉（表现就是「只能关闭、不能重启」）。因此 Windows 上改为把重启交给 WMI 服务：
+
+1. 在 `%TEMP%\dsh-restart-button-relaunch.ps1` 写一个 PowerShell 助手脚本：等待 3 秒 → 切回原工作目录 → 透传当前进程的环境变量 → 执行 `node <dsh bin.js> <原来的 argv>`
+2. 通过 **WMI（`Win32_Process.Create`）** 创建这个助手进程 —— 它的父进程是 WMI 服务（`WmiPrvSE.exe`），**完全不在 DSH 的进程树里**，所以 DSH 退出后照常存活
+3. 确认创建成功后，DSH 才 `process.exit(0)`
+
+WMI 创建失败时会回退到 detached spawn 方式。POSIX（macOS / Linux）仍用 `sh -c 'sleep 3; exec …'`，那里的 `detached` 会调用 `setsid(2)`，能真正脱离父进程。
+
+因为重新执行的是 `process.execPath` + `process.argv.slice(1)`（含 `--profile` 等参数），所以无论用 `dsh web`、`npx @deepseek-ai/dsh web` 还是 `node /path/to/dsh web` 启动，都能正确重启。
+
+> 排查用日志：`%TEMP%\dsh-restart-button.log`（Windows）记录了每次重启的请求、助手进程 PID 与退出码。
+
+### 客户端落位与关闭页面（`src/client/index.tsx`）
 
 客户端用 DSH 官方的插槽机制落位，而不是猜测 DOM：`conversation.session.header.utilities` 是 ui-conversation 声明的 `kind: 'list'` 座位，和宿主自己的「Session log」胶囊同一行，按 `order` 插在流内，因此不会与宿主控件重叠。`slots.inject` 会等待该座位的声明出现（可能晚于本插件激活），声明被撤销后重新声明时会再次回调。React 由 DSH 客户端模块表作为平台基线模块提供，产物中只保留 `require('react')`，不打包第二份 React。
+
+关闭页面用 `window.open('', '_self', '')` + `window.close()`。若浏览器拒绝关闭（手动打开的标签页会这样），400ms 后页面转为整屏提示，避免留下一个已断连的界面。
 
 ## 构建
 
