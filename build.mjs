@@ -40,14 +40,24 @@ async function main() {
   });
 
   // ---- Client half ----
-  // Step 1: bundle to a temp CJS file (browser globals, no externals).
+  // Step 1: bundle to a temp CJS file.
+  //
+  // `react` stays external: the DSH client module table seeds React as a
+  // platform baseline module, so the factory's `require('react')` resolves it
+  // at materialization. Bundling it would ship a second, incompatible React.
   const tmpPath = join(__dirname, 'lib/client.tmp.js');
   await build({
-    entryPoints: [join(__dirname, 'src/client/index.ts')],
+    entryPoints: [join(__dirname, 'src/client/index.tsx')],
     bundle: true,
     format: 'cjs',
     platform: 'browser',
     target: 'es2022',
+    external: ['react'],
+    // Classic transform: the JSX factory is the `createElement` this bundle
+    // imports from React, so no react/jsx-runtime entry point is required.
+    jsx: 'transform',
+    jsxFactory: 'createElement',
+    jsxFragment: 'Fragment',
     outfile: tmpPath,
     sourcemap: false, // we attach a map below by re-emitting is unnecessary; keep simple
     logLevel: 'info',

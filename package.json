@@ -1,7 +1,7 @@
 {
   "name": "@pangxitong/dsh-restart-button",
-  "version": "0.1.0",
-  "description": "Power button for the DeepSeek Harness (dsh) Web UI toolbar: click to expand a Close / Restart pair that shuts down or relaunches the whole DSH process. Self-contained, no external scripts.",
+  "version": "0.2.0",
+  "description": "Power button in the DeepSeek Harness (dsh) Web UI session header: click to expand a Close / Restart pair that shuts down or relaunches the whole DSH process. Self-contained, no external scripts.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -24,7 +24,9 @@
     },
     "client": {
       "platform": "web",
-      "inject": []
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
     }
   },
   "keywords": [
@@ -45,7 +47,9 @@
   },
   "homepage": "https://github.com/PangXitong/dsh-restart-button#readme",
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1"
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.5-rc.1",
+    "react": "^18.2.0"
   },
   "devDependencies": {
     "esbuild": "^0.25.0"

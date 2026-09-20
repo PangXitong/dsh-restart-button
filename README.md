@@ -1,17 +1,17 @@
 # dsh-restart-button
 
-在 DeepSeek Harness（dsh）Web UI 的主界面工具栏新增一个**关机按钮**，点击后向右侧展开「关闭 / 重启」两个操作，一键关闭或重启整个 DSH 进程。
+在 DeepSeek Harness（dsh）Web UI 的会话头部右侧工具区新增一个**关机按钮**，点击后展开「关闭 / 重启」两个操作，一键关闭或重启整个 DSH 进程。
 
-> A power button for the DeepSeek Harness (dsh) Web UI toolbar. Click to expand a **Close / Restart** pair that shuts down or relaunches the whole DSH process.
+> A power button in the DeepSeek Harness (dsh) Web UI session header. Click to expand a **Close / Restart** pair that shuts down or relaunches the whole DSH process.
 
 ## 特性
 
-- 主界面工具栏的关机图标按钮（⏻），悬浮高亮
-- 点击展开右侧气泡菜单：「重启」「关闭」
+- 会话头部右侧工具区（工具栏）的关机图标按钮（⏻），悬浮高亮
+- 点击展开菜单：「重启」「关闭」
   - **关闭**：立即关闭整个 DeepSeek Harness 进程
   - **重启**：拉起一个独立、隐藏的子进程，2 秒后重新启动同一个 DSH 命令，旧标签页自动断线重连
 - 自包含重启：用 `process.execPath` + `process.argv` 重新拉起 DSH，**无需任何外部 `.bat` / `.sh` 脚本**，跨平台（Windows / macOS / Linux）
-- 纯 DOM 注入，不改 DSH 核心；DSH 版本变化导致工具栏选择器未命中时，8 秒后自动降级为右上角浮动按钮
+- 注册进 DSH 官方插槽 `conversation.session.header.utilities`，不改 DSH 核心；由 React 正常渲染，不依赖 DOM 结构猜测
 
 ## 安装
 
@@ -40,9 +40,11 @@ dsh plugin --profile web add @pangxitong/dsh-restart-button
 | 半侧 | 文件 | 职责 |
 | --- | --- | --- |
 | Host（`lib/index.js`，Node 主进程） | `src/index.ts` | 通过 `ctx.inject(['webServer'])` 注册两条同源 HTTP 路由：`POST /dsh-restart-button/close`（`process.exit(0)`）与 `POST /dsh-restart-button/restart`（spawn 独立子进程重拉 DSH 后退出） |
-| Client（`lib/client.js`，浏览器） | `src/client/index.ts` | 用 `MutationObserver` 监听并定位工具栏容器，纯 DOM 注入关机按钮与展开菜单；点击按钮 `fetch` 同源路由 |
+| Client（`lib/client.js`，浏览器） | `src/client/index.tsx` | 通过 `ctx.slots.inject('conversation.session.header.utilities', …)` 把关机按钮注册进会话头部右侧工具区（`kind: 'list'` 官方插槽）；点击按钮 `fetch` 同源路由 |
 
 重启核心逻辑见 [src/index.ts](src/index.ts) 的 `relaunchDetached()`：用当前进程的 `process.execPath`（node）与 `process.argv.slice(1)`（启动参数，含 `--profile` 等）构造一条延迟 2 秒后重新执行的命令，以 detached、隐藏窗口方式 spawn，再让当前进程退出。因此无论你用 `dsh web`、`npx @deepseek-ai/dsh web` 还是 `node /path/to/dsh web` 启动，都能正确重启。
+
+客户端用 DSH 官方的插槽机制落位，而不是猜测 DOM：`conversation.session.header.utilities` 是 ui-conversation 声明的 `kind: 'list'` 座位，和宿主自己的「Session log」胶囊同一行，按 `order` 插在流内，因此不会与宿主控件重叠。`slots.inject` 会等待该座位的声明出现（可能晚于本插件激活），声明被撤销后重新声明时会再次回调。React 由 DSH 客户端模块表作为平台基线模块提供，产物中只保留 `require('react')`，不打包第二份 React。
 
 ## 构建
 
@@ -57,11 +59,11 @@ pnpm run build        # node build.mjs，依赖 esbuild
 
 ## 兼容性
 
-- DeepSeek Harness `0.1.x`（开发者预览版，存在破坏性更新）
+- DeepSeek Harness `0.1.5+`（开发该插件时的版本；会话头部工具插槽 `conversation.session.header.utilities` 需存在于 ui-conversation）
 - Node.js `^22.19.0` 或 `>=24`
 - 平台：Windows / macOS / Linux
 
-> 若 DSH 版本更新导致工具栏 DOM 选择器未命中，可在 `src/client/index.ts` 的 `findToolbarContainer()` 里补充选择器后 `pnpm run build` 重新生成 `lib/`。
+> 该插槽属于 DSH 0.1.x 开发者预览版契约，破坏性更新后可能需要调整插槽名。插槽名在 `src/client/index.tsx` 的 `SLOT_HEADER_UTILITIES` 常量里；`src/client/react-shim.d.ts` 只是为了让本仓库在未安装 `@types/react` 时也能通过类型检查，若之后加入 `@types/react`，删掉该文件即可。
 
 ## 许可证
 
