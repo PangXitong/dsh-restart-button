@@ -10,7 +10,7 @@
 - 点击展开菜单：「重启」「关闭」
   - **关闭**：先关闭当前网页，再关闭整个 DeepSeek Harness 进程
   - **重启**：先关闭当前网页，再由一个独立进程在 3 秒后重新启动同一个 DSH 命令
-- 自包含重启：用 `process.execPath` + `process.argv` 重新拉起 DSH，**无需任何外部 `.bat` / `.sh` 脚本**，跨平台（Windows / macOS / Linux）
+- 自包含重启：用 `process.execPath` + `process.argv` 重新拉起 DSH，**无需任何外部 `.bat` / `.sh` 脚本**（各平台支持情况见下方「兼容性」）
 - 注册进 DSH 官方插槽 `conversation.session.header.utilities`，不改 DSH 核心；由 React 正常渲染，不依赖 DOM 结构猜测
 
 ## 安装
@@ -59,9 +59,11 @@ dsh plugin --profile web add github:PangXitong/dsh-restart-button
 2. 通过 **WMI（`Win32_Process.Create`）** 创建这个助手进程 —— 它的父进程是 WMI 服务（`WmiPrvSE.exe`），**完全不在 DSH 的进程树里**，所以 DSH 退出后照常存活
 3. 确认创建成功后，DSH 才 `process.exit(0)`
 
-WMI 创建失败时会回退到 detached spawn 方式。POSIX（macOS / Linux）仍用 `sh -c 'sleep 3; exec …'`，那里的 `detached` 会调用 `setsid(2)`，能真正脱离父进程。
+WMI 创建失败时会回退到 detached spawn 方式。
 
-因为重新执行的是 `process.execPath` + `process.argv.slice(1)`（含 `--profile` 等参数），所以无论用 `dsh web`、`npx @deepseek-ai/dsh web` 还是 `node /path/to/dsh web` 启动，都能正确重启。
+POSIX（macOS / Linux）走的是另一条路径：`sh -c 'sleep 3; exec …'` 配合 `detached: true`，理论依据是 `detached` 在 POSIX 上会调用 `setsid(2)` 建立新会话，配合 `stdio: 'ignore'` 可避免父进程退出时子进程收到 `SIGHUP`。**该路径尚未在真机上验证**，详见「兼容性」一节。
+
+因为重新执行的是 `process.execPath` + `process.argv.slice(1)`（含 `--profile` 等参数），所以无论用 `dsh web`、`npx @deepseek-ai/dsh web` 还是 `node /path/to/dsh web` 启动，都能带同样的参数重启（在 Windows 上已实测；POSIX 上若通过符号链接启动，`process.argv[1]` 为软链路径，尚待验证）。
 
 > 排查用日志：`%TEMP%\dsh-restart-button.log`（Windows）记录了每次重启的请求、助手进程 PID 与退出码。
 
@@ -86,7 +88,23 @@ pnpm run build        # node build.mjs，依赖 esbuild
 
 - DeepSeek Harness `0.1.5+`（开发该插件时的版本；会话头部工具插槽 `conversation.session.header.utilities` 需存在于 ui-conversation）
 - Node.js `^22.19.0` 或 `>=24`
-- 平台：Windows / macOS / Linux
+
+**平台支持情况：**
+
+| 平台 | 关闭 | 重启 |
+| --- | --- | --- |
+| Windows | ✅ 已验证 | ✅ 已验证 |
+| macOS | ✅（纯 Node API，无平台差异） | ⚠️ 未验证 |
+| Linux | ✅（纯 Node API，无平台差异） | ⚠️ 未验证 |
+
+**关闭**是纯 Node 的 `process.exit(0)`，无平台差异。
+
+**重启**在 Windows 上已实测通过（见上节）；macOS / Linux 走的是另一条代码路径（`sh -c 'sleep 3; exec …'` + `detached: true`），该路径**尚未在真机上验证过**。理论上 `detached` 在 POSIX 上会调用 `setsid(2)` 建立新会话、配合 `stdio: 'ignore'` 可避免父进程退出时的 `SIGHUP`，但以下两点仍需实测确认：
+
+- 孤儿进程在 macOS 的 `launchd` / Linux 各 init 系统下的存活行为
+- 通过符号链接启动 DSH（如 `/usr/local/bin/dsh`）时，`process.argv[1]` 为软链路径，重启后能否正确定位入口文件
+
+在 macOS / Linux 上使用前请先自行验证重启功能；关闭功能可直接使用。
 
 > 该插槽属于 DSH 0.1.x 开发者预览版契约，破坏性更新后可能需要调整插槽名。插槽名在 `src/client/index.tsx` 的 `SLOT_HEADER_UTILITIES` 常量里；`src/client/react-shim.d.ts` 只是为了让本仓库在未安装 `@types/react` 时也能通过类型检查，若之后加入 `@types/react`，删掉该文件即可。
 
