@@ -1,0 +1,4 @@
+# dsh-restart-button: DSH Web 工具栏关机按钮，点击展开关闭/重启 DSH
+- insert:
+    - id: dsh-restart-button
+      name: '@pangxitong/dsh-restart-button'
