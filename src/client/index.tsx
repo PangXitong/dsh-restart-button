@@ -159,15 +159,36 @@ function MenuRow(props: {
 }
 
 /**
+ * Try to close the browser tab. Browsers only allow `window.close()` for
+ * windows a script opened; the `window.open('', '_self', '')` preamble is the
+ * well-known trick that also works for a hand-opened tab in some browsers.
+ * Callers must still handle the case where the tab stays open.
+ */
+function closePage(): void {
+  try {
+    window.open('', '_self', '');
+  } catch {
+    // ignore — some browsers throw on the placeholder open
+  }
+  try {
+    window.close();
+  } catch {
+    // ignore — closing is best-effort
+  }
+}
+
+/**
  * The header control: a power button that toggles a Close / Restart menu.
  *
- * Busy state is terminal on purpose — the Host exits shortly after replying, so
- * the tab disconnects and reconnects on its own; re-enabling the control would
- * only invite a second request against a dying process.
+ * Both actions work the same way: send the request, wait for the Host's reply,
+ * close this page, and only then let DSH exit / relaunch. Busy state is
+ * terminal on purpose — the Host exits right after replying, and re-enabling
+ * the control would only invite a second request against a dying process.
  */
 function PowerMenu(): ReactNode {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<'close' | 'restart' | null>(null);
+  const [done, setDone] = useState<'close' | 'restart' | null>(null);
   const [hover, setHover] = useState(false);
   const rootRef = useRef<HTMLSpanElement | null>(null);
 
@@ -189,16 +210,74 @@ function PowerMenu(): ReactNode {
     };
   }, [open]);
 
-  const send = (route: string, kind: 'close' | 'restart') => {
+  const send = async (route: string, kind: 'close' | 'restart') => {
     if (busy) return;
     setBusy(kind);
-    // The Host replies, then exits ~300ms later. A rejected fetch means the
-    // process went away before the body arrived — the expected success path —
-    // so the rejection is deliberately swallowed.
-    void fetch(route, { method: 'POST' }).catch(() => undefined);
+    setOpen(false);
+    try {
+      // `keepalive` keeps the request alive even if the tab goes away the
+      // instant we close it. A rejected fetch means the Host died before the
+      // reply arrived — that is the expected success path for close, so the
+      // rejection is deliberately swallowed.
+      await fetch(route, { method: 'POST', keepalive: true });
+    } catch {
+      // Host already gone — fine.
+    }
+    // Page first, then the Host tears itself down: for restart the Host only
+    // creates its successor after replying, and it exits a moment later.
+    closePage();
+    // If the browser refused to close the tab, surface a manual fallback.
+    window.setTimeout(() => setDone(kind), 400);
   };
 
   const title = '关闭 / 重启 DeepSeek Harness';
+
+  // Browsers block `window.close()` for tabs the user opened by hand, so when
+  // the tab survives we take over the viewport with a "you can close this now"
+  // notice instead of leaving a dead page behind.
+  if (done) {
+    return (
+      <div
+        style={{
+          position: 'fixed',
+          inset: 0,
+          zIndex: 2147483647,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: '16px',
+          background: 'var(--dsw-alias-bg-base, #ffffff)',
+          color: 'inherit',
+          fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
+        }}
+      >
+        <div style={{ fontSize: '15px', fontWeight: 600 }}>
+          {done === 'restart' ? 'DSH 正在重启…' : 'DSH 已关闭'}
+        </div>
+        <div style={{ fontSize: '13px', opacity: 0.7 }}>
+          {done === 'restart' ? '服务重启后请刷新此页面' : '此页面可以关闭了'}
+        </div>
+        <button
+          type="button"
+          onClick={closePage}
+          style={{
+            padding: '8px 18px',
+            border: '1px solid color-mix(in srgb, currentColor 22%, transparent)',
+            borderRadius: '8px',
+            background: 'color-mix(in srgb, currentColor 8%, transparent)',
+            color: 'inherit',
+            cursor: 'pointer',
+            font: 'inherit',
+            fontSize: '13px',
+            fontWeight: 500,
+          }}
+        >
+          关闭此页面
+        </button>
+      </div>
+    );
+  }
 
   return (
     <span ref={rootRef} style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
