@@ -53,8 +53,20 @@ function buildRelaunchCommand(): string {
 }
 
 /**
- * Spawn the relaunch helper as a detached, hidden process and let it outlive
+ * Spawn the relaunch helper as a detached process and let it outlive
  * this one. Returns the spawned ChildProcess (or null on failure).
+ *
+ * Windows notes:
+ *   • We rely on PowerShell's `-WindowStyle Hidden` instead of
+ *     `windowsHide: true`.  In Node ≥ 20 the `windowsHide` flag can
+ *     interfere with detached process survival — the child may be
+ *     terminated when the parent exits even though `detached: true`
+ *     creates a new process group.
+ *   • We do NOT pass `stdio: 'ignore'` for the PowerShell wrapper.
+ *     `stdio: 'ignore'` on Windows has been observed to cause the
+ *     child process to be cleaned up prematurely when the parent
+ *     exits, because the OS tears down inherited stdio handles in a
+ *     way that can affect detached children.
  */
 function relaunchDetached() {
   const cmd = buildRelaunchCommand();
@@ -63,7 +75,7 @@ function relaunchDetached() {
       const child = spawn(
         'powershell.exe',
         ['-WindowStyle', 'Hidden', '-NoProfile', '-Command', cmd],
-        { detached: true, stdio: 'ignore', windowsHide: true },
+        { detached: true, stdio: 'inherit' },
       );
       child.unref();
       return child;
@@ -125,8 +137,10 @@ function apply(ctx: DshContext) {
                 relaunchDetached();
                 sendJson(res, 200, { ok: true, action: 'restart' });
                 // Give the response time to flush, then exit so the
-                // detached helper can re-bind the port.
-                setTimeout(() => process.exit(0), 300);
+                // detached helper can re-bind the port.  We wait
+                // 2 s to ensure PowerShell has fully started and
+                // begun its own sleep cycle.
+                setTimeout(() => process.exit(0), 2000);
               } else {
                 console.log('[' + PLUGIN_ID + '] close requested');
                 sendJson(res, 200, { ok: true, action: 'close' });
