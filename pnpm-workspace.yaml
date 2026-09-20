@@ -1,2 +1,3 @@
-onlyBuiltDependencies:
-  - esbuild
+# esbuild ships a native binary, so its install script must be allowed to run.
+allowBuilds:
+  esbuild: true

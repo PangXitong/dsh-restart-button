@@ -1,0 +1,5 @@
+# Built artifacts are committed and hash-compared by DSH's client-modules
+# registry, so normalize line endings to keep rebuilds byte-identical.
+* text=auto eol=lf
+*.png binary
+*.ico binary

@@ -15,21 +15,17 @@
 
 ## 安装
 
-在终端执行其中一种：
+在终端执行：
 
 ```bash
-# 从 GitHub 安装
 dsh plugin --profile web add github:PangXitong/dsh-restart-button
-
-# 或从 npm 安装（需先发布到 npm）
-dsh plugin --profile web add @pangxitong/dsh-restart-button
 ```
 
 然后重启 DSH，刷新页面，工具栏右侧即出现关机按钮。
 
 ## 使用
 
-1. 点击工具栏右侧的关机按钮（⏻）→ 右侧弹出菜单
+1. 点击工具栏右侧的关机按钮（⏻）→ 下方展开菜单
 2. 点击「关闭」→ DSH 进程退出
 3. 点击「重启」→ DSH 进程重启，浏览器标签页断线后自动重连
 
