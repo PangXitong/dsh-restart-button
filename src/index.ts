@@ -66,6 +66,24 @@ function launchParts(): { execPath: string; args: string[] } {
 }
 
 /**
+ * Lines that copy this process's environment into the helper.
+ *
+ * A WMI-created process inherits the WMI provider's environment, not DSH's,
+ * so anything DSH was launched with (PATH, proxy settings, tokens, ...) would
+ * otherwise be lost on the way back up.
+ */
+function envSetupLines(): string[] {
+  const lines: string[] = [];
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined) continue;
+    // Only names PowerShell can address as Env:<name>.
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    lines.push('Set-Item -LiteralPath ' + quotePs('Env:' + key) + ' -Value ' + quotePs(value));
+  }
+  return lines;
+}
+
+/**
  * Write a PowerShell helper that waits, then re-runs the launch command.
  * Returns the helper's absolute path.
  */
@@ -80,6 +98,7 @@ function writeWindowsHelper(): string {
       's")',
     'Start-Sleep -Seconds ' + RESTART_DELAY_SECONDS,
     'Set-Location -LiteralPath ' + quotePs(process.cwd()),
+    ...envSetupLines(),
     'Add-Content -LiteralPath $log -Value ("[" + (Get-Date).ToString("o") + "] helper launching dsh")',
     // The helper stays alive as the parent of the server, so its hidden
     // console is inherited and no window flashes.
