@@ -3,94 +3,193 @@
  *
  * Registers two same-origin HTTP routes that the browser-side button calls:
  *   POST /dsh-restart-button/close    → exit the DSH process
- *   POST /dsh-restart-button/restart  → spawn a detached re-launch, then exit
+ *   POST /dsh-restart-button/restart  → spawn an independent re-launch, then exit
  *
- * The restart is self-contained: it re-runs the exact command that started
- * this process (process.execPath + process.argv) inside a detached, hidden
- * helper process that waits ~2s for this process to release the port before
- * relaunching. No external .bat/.sh script is required, so the plugin stays
- * distributable as a single npm package across Windows / macOS / Linux.
+ * Restart strategy (Windows)
+ * --------------------------
+ * A plain `spawn(..., { detached: true })` from the DSH process is NOT
+ * reliable: the helper is still created as a child of DSH, so it dies with
+ * the parent (and stays inside whatever job object the launcher set up).
+ *
+ * Instead we hand the re-launch to the WMI service:
+ *
+ *   1. Write a small PowerShell helper script to %TEMP% that sleeps a few
+ *      seconds and then starts `node <dsh bin> <args>`.
+ *   2. Ask WMI (Win32_Process.Create) to create a hidden PowerShell that runs
+ *      the helper.  The WMI provider is the parent, so the new process is
+ *      completely outside DSH's process tree and survives DSH exiting.
+ *   3. Exit DSH.  The helper wakes up after the delay and re-binds the port.
+ *
+ * The WMI creation runs synchronously so we know the helper exists before
+ * DSH goes away.  If it fails for any reason we fall back to the detached
+ * spawn (better than nothing).
+ *
+ * POSIX keeps the simple `sh -c 'sleep N; exec ...'` approach — there the
+ * `detached` flag calls setsid(2), which genuinely reparents the child.
  */
-import { spawn } from 'node:child_process';
-import { platform } from 'node:os';
+import { execFile, spawn } from 'node:child_process';
+import { appendFileSync, writeFileSync } from 'node:fs';
+import { platform, tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const PLUGIN_ID = 'dsh-restart-button';
 
 const isWindows = platform() === 'win32';
 
-/** Escape a single value for a single-quoted PowerShell string (' -> ''). */
-function quoteWin(value: string): string {
+/** Seconds the helper waits before re-launching, so the port is released. */
+const RESTART_DELAY_SECONDS = 3;
+
+/** Best-effort diagnostic log; never throws. */
+const LOG_PATH = join(tmpdir(), PLUGIN_ID + '.log');
+
+function log(message: string): void {
+  try {
+    appendFileSync(LOG_PATH, '[' + new Date().toISOString() + '] ' + message + '\n');
+  } catch {
+    // logging must never break the plugin
+  }
+}
+
+/** Escape a value for a single-quoted PowerShell string (' -> ''). */
+function quotePs(value: string): string {
   return "'" + String(value).replace(/'/g, "''") + "'";
 }
 
-/** Escape a single value for a single-quoted POSIX sh string (' -> '\''). */
+/** Escape a value for a single-quoted POSIX sh string (' -> '\''). */
 function quotePosix(value: string): string {
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
 
-/**
- * Build the shell command that waits briefly (so this process can release the
- * port / exit) and then re-runs the exact launch command.
- *
- * Re-running process.execPath + process.argv works whether DSH was started
- * via `dsh web`, `npx @deepseek-ai/dsh web`, or `node /path/to/dsh web` —
- * the spawned child inherits the same argv and therefore the same profile /
- * flags (e.g. `--profile web`).
- */
-function buildRelaunchCommand(): string {
-  const execPath = process.execPath;
-  const args = process.argv.slice(1);
-  if (isWindows) {
-    // PowerShell: hidden, no profile, sleep 2s, then invoke execPath with args.
-    const tail = args.map(quoteWin).join(' ');
-    const invoke = '& ' + quoteWin(execPath) + (tail ? ' ' + tail : '');
-    return 'Start-Sleep -Seconds 2; ' + invoke;
-  }
-  // POSIX sh: sleep 2s, then exec execPath with args.
-  const tail = args.map(quotePosix).join(' ');
-  const invoke = 'exec ' + quotePosix(execPath) + (tail ? ' ' + tail : '');
-  return 'sleep 2; ' + invoke;
+/** The exact command line that started this process, re-runnable as-is. */
+function launchParts(): { execPath: string; args: string[] } {
+  return { execPath: process.execPath, args: process.argv.slice(1) };
 }
 
 /**
- * Spawn the relaunch helper as a detached process and let it outlive
- * this one. Returns the spawned ChildProcess (or null on failure).
- *
- * Windows notes:
- *   • We rely on PowerShell's `-WindowStyle Hidden` instead of
- *     `windowsHide: true`.  In Node ≥ 20 the `windowsHide` flag can
- *     interfere with detached process survival — the child may be
- *     terminated when the parent exits even though `detached: true`
- *     creates a new process group.
- *   • We do NOT pass `stdio: 'ignore'` for the PowerShell wrapper.
- *     `stdio: 'ignore'` on Windows has been observed to cause the
- *     child process to be cleaned up prematurely when the parent
- *     exits, because the OS tears down inherited stdio handles in a
- *     way that can affect detached children.
+ * Write a PowerShell helper that waits, then re-runs the launch command.
+ * Returns the helper's absolute path.
  */
-function relaunchDetached() {
-  const cmd = buildRelaunchCommand();
+function writeWindowsHelper(): string {
+  const { execPath, args } = launchParts();
+  const invocation = '& ' + quotePs(execPath) + args.map((a) => ' ' + quotePs(a)).join('');
+  const lines = [
+    '$ErrorActionPreference = "Continue"',
+    '$log = ' + quotePs(LOG_PATH),
+    'Add-Content -LiteralPath $log -Value ("[" + (Get-Date).ToString("o") + "] helper started, waiting ' +
+      RESTART_DELAY_SECONDS +
+      's")',
+    'Start-Sleep -Seconds ' + RESTART_DELAY_SECONDS,
+    'Set-Location -LiteralPath ' + quotePs(process.cwd()),
+    'Add-Content -LiteralPath $log -Value ("[" + (Get-Date).ToString("o") + "] helper launching dsh")',
+    // The helper stays alive as the parent of the server, so its hidden
+    // console is inherited and no window flashes.
+    invocation,
+    'Add-Content -LiteralPath $log -Value ("[" + (Get-Date).ToString("o") + "] dsh exited with code " + $LASTEXITCODE)',
+  ];
+  const helperPath = join(tmpdir(), PLUGIN_ID + '-relaunch.ps1');
+  writeFileSync(helperPath, lines.join('\r\n') + '\r\n', 'utf8');
+  return helperPath;
+}
+
+/**
+ * Ask the WMI service to create the helper process.  Because WmiPrvSE is the
+ * parent, the helper is not part of DSH's process tree and survives DSH
+ * exiting.  Calls back once the helper exists (or once we gave up).
+ */
+function relaunchWindows(done: () => void): void {
+  let helperPath: string;
+  try {
+    helperPath = writeWindowsHelper();
+  } catch (err) {
+    log('could not write helper script, falling back: ' + String(err));
+    relaunchViaSpawnWindows();
+    done();
+    return;
+  }
+
+  const commandLine =
+    'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' +
+    helperPath +
+    '"';
+  const psCommand =
+    'Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ' +
+    quotePs(commandLine) +
+    ' } | Select-Object -ExpandProperty ProcessId';
+
+  execFile(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-Command', psCommand],
+    { encoding: 'utf8', windowsHide: true, timeout: 20000 },
+    (err, stdout) => {
+      const pid = String(stdout || '').trim();
+      if (err || !pid) {
+        log('WMI relaunch failed, falling back: ' + String(err || 'no process id'));
+        try {
+          relaunchViaSpawnWindows();
+        } catch (fallbackErr) {
+          log('fallback relaunch also failed: ' + String(fallbackErr));
+        }
+      } else {
+        log('relaunch via WMI succeeded: helper pid ' + pid + ' (' + helperPath + ')');
+      }
+      done();
+    },
+  );
+}
+
+/** Last-resort Windows path: a detached spawn (works on many setups). */
+function relaunchViaSpawnWindows(): void {
+  const { execPath, args } = launchParts();
+  const cmd =
+    'Start-Sleep -Seconds ' +
+    RESTART_DELAY_SECONDS +
+    '; & ' +
+    quotePs(execPath) +
+    args.map((a) => ' ' + quotePs(a)).join('');
+  const child = spawn(
+    'powershell.exe',
+    ['-WindowStyle', 'Hidden', '-NoProfile', '-Command', cmd],
+    { detached: true, stdio: 'ignore', windowsHide: true },
+  );
+  child.unref();
+  log('relaunch via detached spawn (fallback), pid ' + child.pid);
+}
+
+/** POSIX path: setsid + sleep + exec. */
+function relaunchPosix(): void {
+  const { execPath, args } = launchParts();
+  const cmd =
+    'sleep ' +
+    RESTART_DELAY_SECONDS +
+    '; exec ' +
+    quotePosix(execPath) +
+    args.map((a) => ' ' + quotePosix(a)).join('');
+  const child = spawn('sh', ['-c', cmd], { detached: true, stdio: 'ignore' });
+  child.unref();
+  log('relaunch via detached sh, pid ' + child.pid);
+}
+
+/**
+ * Create the re-launch helper, then report back through `done`.
+ * `done` is what should trigger this process to exit.
+ */
+function relaunchDetached(done: () => void): void {
   try {
     if (isWindows) {
-      const child = spawn(
-        'powershell.exe',
-        ['-WindowStyle', 'Hidden', '-NoProfile', '-Command', cmd],
-        { detached: true, stdio: 'inherit' },
-      );
-      child.unref();
-      return child;
+      relaunchWindows(done);
+      return;
     }
-    const child = spawn('sh', ['-c', cmd], { detached: true, stdio: 'ignore' });
-    child.unref();
-    return child;
+    relaunchPosix();
+    done();
   } catch (err) {
-    console.error('[' + PLUGIN_ID + '] relaunch spawn failed:', err);
-    return null;
+    log('relaunch failed: ' + String(err));
+    console.error('[' + PLUGIN_ID + '] relaunch failed:', err);
+    done();
   }
 }
 
 /** Send a JSON response and end the request. */
-function sendJson(res: any, status: number, body: unknown) {
+function sendJson(res: any, status: number, body: unknown): void {
   try {
     res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(body));
@@ -113,7 +212,7 @@ interface DshContext {
   get<T = unknown>(name: string): T | undefined;
 }
 
-function apply(ctx: DshContext) {
+function apply(ctx: DshContext): void {
   ctx.inject(['webServer'], (httpCtx: DshContext) => {
     httpCtx.effect(() => {
       const routes: Array<{ path: string; action: 'close' | 'restart' }> = [
@@ -133,16 +232,14 @@ function apply(ctx: DshContext) {
             }
             try {
               if (route.action === 'restart') {
-                console.log('[' + PLUGIN_ID + '] restart requested');
-                relaunchDetached();
+                log('restart requested');
+                // Answer immediately — the helper creation takes a moment.
                 sendJson(res, 200, { ok: true, action: 'restart' });
-                // Give the response time to flush, then exit so the
-                // detached helper can re-bind the port.  We wait
-                // 2 s to ensure PowerShell has fully started and
-                // begun its own sleep cycle.
-                setTimeout(() => process.exit(0), 2000);
+                // Create the successor FIRST, then exit: the helper is owned
+                // by the WMI service, so it outlives this process.
+                relaunchDetached(() => setTimeout(() => process.exit(0), 300));
               } else {
-                console.log('[' + PLUGIN_ID + '] close requested');
+                log('close requested');
                 sendJson(res, 200, { ok: true, action: 'close' });
                 setTimeout(() => process.exit(0), 300);
               }
