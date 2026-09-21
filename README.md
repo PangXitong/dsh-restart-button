@@ -31,6 +31,14 @@ dsh plugin --profile web add github:PangXitong/dsh-restart-button
 
 > 浏览器只允许脚本关闭「由脚本打开」的窗口，手动打开的标签页通常无法自动关闭。此时页面会转为整屏提示（「DSH 已关闭」/「DSH 正在重启…」），并提供「关闭此页面」按钮手动关闭。
 
+## 截图
+
+![关机按钮在工具栏中的位置](screenshot-1.png)
+
+点击关机按钮展开菜单：
+
+![关闭 / 重启菜单](screenshot-2.png)
+
 ## 工作原理
 
 插件采用 DSH 的「双半侧」结构：

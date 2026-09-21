@@ -1,0 +1,9 @@
+url: https://github.com/PangXitong/dsh-restart-button
+name: PangXitong/dsh-restart-button
+category: ui
+description:
+  en: Power button in the Deepseek Harness Web UI session header that lets you close or restart the whole DSH process.
+  zh: Deepseek Harness Web UI 会话头部的关机按钮，可点击关闭或重启整个 DSH 进程。
+screenshots:
+  - screenshot-1.png
+  - screenshot-2.png
